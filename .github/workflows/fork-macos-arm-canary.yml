@@ -1,0 +1,88 @@
+name: Fork macOS ARM Canary (fix-3816)
+
+# Fork-only workflow: produces an unsigned Apple Silicon DMG of v0.5.5 with
+# PR #3816 cherry-picked, for manual testing. Adapted from upstream's
+# macos-intel-canary.yml with the block/buzz repository guards removed and no
+# cache-key scripts. Never intended for upstream merge.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build unsigned Apple Silicon DMG
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - name: Add Rust target
+        run: rustup target add "$TARGET"
+
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+
+      - name: Restore Cargo cache
+        id: rust_cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            desktop/src-tauri/target
+            !desktop/src-tauri/target/**/release/bundle
+          key: fork-cargo-${{ runner.os }}-arm64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: fork-cargo-${{ runner.os }}-arm64-
+
+      - name: Generate non-updating bundle config
+        run: |
+          cat > desktop/src-tauri/tauri.canary.conf.json <<'JSON'
+          {"bundle":{"createUpdaterArtifacts":false}}
+          JSON
+
+      - name: Build sidecars
+        run: |
+          cargo build --release --target "$TARGET" -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          ./scripts/bundle-sidecars.sh "$TARGET"
+
+      - name: Build unsigned DMG
+        run: cd desktop && pnpm tauri build --verbose --no-sign --target "$TARGET" --bundles dmg --config src-tauri/tauri.canary.conf.json
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          TAURI_BUNDLER_DMG_IGNORE_CI: "true"
+
+      - name: Locate DMG
+        id: artifact
+        run: |
+          DMG=$(find "desktop/src-tauri/target/${TARGET}/release/bundle/dmg" -name '*.dmg' -type f | head -1)
+          [[ -n "$DMG" ]] || { echo "::error::No DMG found"; exit 1; }
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: buzz-macos-arm-fix3816-${{ github.sha }}
+          path: ${{ steps.artifact.outputs.dmg }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Save Cargo cache
+        if: always() && steps.rust_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            desktop/src-tauri/target
+            !desktop/src-tauri/target/**/release/bundle
+          key: fork-cargo-${{ runner.os }}-arm64-${{ hashFiles('**/Cargo.lock') }}
