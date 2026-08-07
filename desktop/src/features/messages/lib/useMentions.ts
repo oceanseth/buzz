@@ -14,9 +14,13 @@ import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomple
 import {
   coalesceAgentAutocompleteCandidates,
   coalesceAutocompleteCandidatesByKey,
+  filterCachedAgentSuggestions,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  shouldOfferAgentIdentityForMentions,
+  isAgentIdentityInAllowedList,
+  isAgentMentionChannelType,
+  shouldHideAgentFromMentions,
+  uniqueAutocompleteLabels,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
   useInfiniteUserSearchQuery,
@@ -92,7 +96,6 @@ export function useMentions(
   const mentionMapRef = React.useRef<Map<string, string>>(new Map());
   const personaMentionMapRef = React.useRef<Map<string, string>>(new Map());
   const previousSuggestionsRef = React.useRef<MentionSuggestion[]>([]);
-  void options?.channelType;
   const mentionSearchQuery = mentionQuery?.trim() ?? "";
   const canSearchGlobalPeople = mentionSearchQuery.length > 0;
   const identityQuery = useIdentityQuery();
@@ -191,10 +194,16 @@ export function useMentions(
     () => getSharedChannelIds(channelsQuery.data),
     [channelsQuery.data],
   );
+  const mentionChannelId = isAgentMentionChannelType(options?.channelType)
+    ? channelId
+    : null;
   const mentionableAgentPubkeys = React.useMemo(
     () =>
       getMentionableAgentPubkeys({
         currentPubkey,
+        eligibilityScope: mentionChannelId
+          ? { type: "channel", channelId: mentionChannelId }
+          : { type: "managed-only" },
         managedAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
         sharedChannelIds,
@@ -202,6 +211,7 @@ export function useMentions(
     [
       currentPubkey,
       managedAgentPubkeys,
+      mentionChannelId,
       relayAgentsQuery.data,
       sharedChannelIds,
     ],
@@ -245,13 +255,16 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
+      if (!isAgentIdentityInAllowedList(candidate, mentionableAgentPubkeys)) {
+        return;
+      }
       if (
-        !shouldOfferAgentIdentityForMentions({
-          candidate: { ...candidate, pubkey },
-          managedAgentPubkeys,
+        shouldHideAgentFromMentions({
+          isAgent: candidate.isAgent === true,
+          isMember: candidate.isMember === true,
+          pubkey,
           mentionableAgentPubkeys,
           directoryAgentPubkeys,
-          relayAgentDirectoryReady,
         })
       ) {
         return;
@@ -416,14 +429,12 @@ export function useMentions(
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
-    managedAgentPubkeys,
     managedAgentsQuery.data,
     memberPubkeys,
     members,
     mentionableAgentPubkeys,
     personaNameByPubkey,
     profiles,
-    relayAgentDirectoryReady,
     relayAgentNamesByPubkey,
     relayAgentsQuery.data,
   ]);
@@ -454,26 +465,10 @@ export function useMentions(
     enabled: ownerPubkeys.length > 0,
   });
 
-  const searchableNames = React.useMemo<string[]>(() => {
-    const names: string[] = [];
-    const seen = new Set<string>();
-
-    for (const candidate of mentionCandidatesWithTeams) {
-      for (const name of [
-        candidate.displayName,
-        candidate.personaName,
-        candidate.secondaryLabel,
-      ]) {
-        const trimmed = name?.trim();
-        if (trimmed && !seen.has(trimmed.toLowerCase())) {
-          names.push(trimmed);
-          seen.add(trimmed.toLowerCase());
-        }
-      }
-    }
-
-    return names;
-  }, [mentionCandidatesWithTeams]);
+  const searchableNames = React.useMemo(
+    () => uniqueAutocompleteLabels(mentionCandidatesWithTeams),
+    [mentionCandidatesWithTeams],
+  );
 
   const highlightNames = React.useMemo<string[]>(() => {
     const names: string[] = [];
@@ -577,11 +572,19 @@ export function useMentions(
     }
 
     if (userSearchQuery.isFetching) {
-      return previousSuggestionsRef.current;
+      return filterCachedAgentSuggestions(
+        previousSuggestionsRef.current,
+        mentionCandidatesWithTeams,
+      );
     }
 
     return [];
-  }, [matchingSuggestions, mentionQuery, userSearchQuery.isFetching]);
+  }, [
+    matchingSuggestions,
+    mentionCandidatesWithTeams,
+    mentionQuery,
+    userSearchQuery.isFetching,
+  ]);
 
   React.useEffect(() => {
     if (mentionQuery === null) {
