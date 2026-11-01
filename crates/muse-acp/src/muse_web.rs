@@ -61,6 +61,13 @@ fn want_headless() -> bool {
 /// The handoff gate for the current run, for callers that need the
 /// full gate (profile + mode) rather than just the boolean. Kept
 /// separate from routing: this function reads no channel state.
+fn cdp_endpoint() -> Option<String> {
+    std::env::var("MUSE_ACP_CDP_ENDPOINT")
+        .ok()
+        .map(|endpoint| endpoint.trim().to_string())
+        .filter(|endpoint| !endpoint.is_empty())
+}
+
 fn current_handoff_gate() -> Option<HandoffGate> {
     let profile = auth::profile_dir()?;
     let mode = handoff::mode_from_env_and_saved_session(auth::has_saved_session());
@@ -334,8 +341,13 @@ impl MuseWebDriver {
             match (composer, login_wall) {
                 (Some(selector), _) => {
                     debug!(composer = selector, "muse composer ready");
-                    if let Err(e) = auth::mark_signed_in() {
-                        warn!("could not record Muse session marker: {e}");
+                    // An attached browser owns its own profile and cookies;
+                    // do not mark the bridge-owned profile as reusable for a
+                    // later launch after the CDP handoff disappears.
+                    if cdp_endpoint().is_none() {
+                        if let Err(e) = auth::mark_signed_in() {
+                            warn!("could not record Muse session marker: {e}");
+                        }
                     }
                     return Ok(());
                 }
@@ -373,11 +385,14 @@ impl MuseWebDriver {
     }
 
     async fn ensure_session_inner(&self, session_id: &str) -> Result<Tab, BridgeError> {
-        // Handoff gate, separate from routing: a headless run without
-        // a saved session fails here, before any browser launch, with
-        // a clear NotSignedIn — it does not silently start unsigned.
-        if let Some(gate) = current_handoff_gate() {
-            gate.check(auth::has_saved_session())?;
+        // An operator-provided CDP browser is already authenticated (or will
+        // prove that through the live composer probe), so do not require the
+        // bridge-owned marker before attaching. The marker gate applies only
+        // to bridge-launched headless Chromium.
+        if cdp_endpoint().is_none() {
+            if let Some(gate) = current_handoff_gate() {
+                gate.check(auth::has_saved_session())?;
+            }
         }
         if let Some(tab) = self.tab_for(session_id).await {
             return Ok(tab);
@@ -389,14 +404,28 @@ impl MuseWebDriver {
         }
         let mut browser_guard = self.browser.lock().await;
         if browser_guard.is_none() {
-            let profile = auth::profile_dir().ok_or_else(|| {
-                BridgeError::NotSignedIn(
-                    "cannot determine a profile directory for the Muse browser session".into(),
-                )
-            })?;
             let headless = want_headless();
-            info!(headless, profile = %profile.display(), "launching Chromium for Muse");
-            let browser = chrome::launch(headless, &profile).await?;
+            let browser = if let Ok(endpoint) = std::env::var("MUSE_ACP_CDP_ENDPOINT") {
+                let endpoint = endpoint.trim();
+                if endpoint.is_empty() {
+                    return Err(BridgeError::ChromeLaunch(
+                        "MUSE_ACP_CDP_ENDPOINT is set but empty".into(),
+                    ));
+                }
+                info!(
+                    endpoint,
+                    "attaching to operator-provided Chromium CDP endpoint"
+                );
+                chrome::attach(endpoint).await?
+            } else {
+                let profile = auth::profile_dir().ok_or_else(|| {
+                    BridgeError::NotSignedIn(
+                        "cannot determine a profile directory for the Muse browser session".into(),
+                    )
+                })?;
+                info!(headless, profile = %profile.display(), "launching Chromium for Muse");
+                chrome::launch(headless, &profile).await?
+            };
             *browser_guard = Some(browser);
         }
         let headless = want_headless();

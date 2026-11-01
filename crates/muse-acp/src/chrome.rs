@@ -105,12 +105,14 @@ impl Connection {
 /// browser kills it.
 pub struct Browser {
     conn: std::sync::Arc<Mutex<Connection>>,
-    child: Child,
+    child: Option<Child>,
 }
 
 impl Drop for Browser {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        if let Some(child) = &mut self.child {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -356,7 +358,73 @@ pub async fn launch(headless: bool, profile_dir: &Path) -> Result<Browser, Bridg
         .map_err(|e| BridgeError::Protocol(format!("cdp websocket connect failed: {e}")))?;
     Ok(Browser {
         conn: std::sync::Arc::new(Mutex::new(Connection { ws, next_id: 1 })),
-        child,
+        child: Some(child),
+    })
+}
+
+/// Attach to an already-running Chromium instance exposed through its
+/// CDP HTTP endpoint. The existing browser process and profile remain owned
+/// by the operator; dropping the returned handle closes only the CDP socket.
+///
+/// `endpoint` may be a host/port such as `127.0.0.1:9333` or a full
+/// `http://host:port` URL. This is the authenticated handoff path: the
+/// browser must already be running with the signed-in Muse profile and
+/// `--remote-debugging-port` enabled.
+pub async fn attach(endpoint: &str) -> Result<Browser, BridgeError> {
+    let endpoint = endpoint.trim();
+    let endpoint = if endpoint.contains("://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{endpoint}")
+    };
+    let endpoint = endpoint.trim_end_matches('/');
+    let base = url::Url::parse(endpoint)
+        .map_err(|e| BridgeError::ChromeLaunch(format!("invalid CDP endpoint: {e}")))?;
+    if base.scheme() != "http" {
+        return Err(BridgeError::ChromeLaunch(
+            "CDP endpoint must use http:// (the local DevTools endpoint is not HTTPS)".into(),
+        ));
+    }
+    let host = base
+        .host_str()
+        .ok_or_else(|| BridgeError::ChromeLaunch("CDP endpoint has no host".into()))?;
+    let port = base
+        .port_or_known_default()
+        .ok_or_else(|| BridgeError::ChromeLaunch("CDP endpoint has no port".into()))?;
+    let mut stream = TcpStream::connect((host, port))
+        .await
+        .map_err(|e| BridgeError::ChromeLaunch(format!("CDP endpoint unavailable: {e}")))?;
+    let request =
+        format!("GET /json/version HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| BridgeError::ChromeLaunch(format!("could not query CDP endpoint: {e}")))?;
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .await
+        .map_err(|e| BridgeError::ChromeLaunch(format!("could not read CDP version: {e}")))?;
+    let text = String::from_utf8_lossy(&raw);
+    let body = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .ok_or_else(|| BridgeError::ChromeLaunch("CDP version response has no body".into()))?;
+    let value: Value = serde_json::from_str(body).map_err(|e| {
+        BridgeError::ChromeLaunch(format!("invalid CDP /json/version response: {e}"))
+    })?;
+    let ws_url = value
+        .get("webSocketDebuggerUrl")
+        .and_then(|u| u.as_str())
+        .ok_or_else(|| {
+            BridgeError::ChromeLaunch("CDP version response has no websocket URL".into())
+        })?;
+    let (ws, _) = connect_async(ws_url)
+        .await
+        .map_err(|e| BridgeError::Protocol(format!("cdp websocket connect failed: {e}")))?;
+    Ok(Browser {
+        conn: std::sync::Arc::new(Mutex::new(Connection { ws, next_id: 1 })),
+        child: None,
     })
 }
 

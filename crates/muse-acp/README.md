@@ -91,9 +91,39 @@ desktop catalog's auth probe):
 muse-acp auth status   # exit 0 = saved session, 1 = none
 ```
 
+When using an operator-owned browser, verify the handoff before starting the
+long-running ACP process:
+
+```sh
+MUSE_ACP_CDP_ENDPOINT=127.0.0.1:9333 muse-acp cdp status
+```
+
+A successful check prints JSON with `"websocket_connected":true` and
+`"muse_tab_ready":true`. The command creates and closes only a temporary tab;
+it never closes the operator's browser. A reachable CDP port with
+`"muse_tab_ready":false` (or `null`) is not authenticated delivery.
+
 If the saved login expires, the next turn fails with a clear
 `NotSignedIn` error and the following run waits for sign-in again — the
 stale marker self-heals instead of stranding turns.
+
+## Attach to an already-authenticated browser via CDP
+
+If Muse is already signed in in a visible Chromium instance, the bridge can
+attach to that exact browser instead of launching a separate profile. Start
+Chromium with remote debugging enabled (for example, on `127.0.0.1:9333`),
+leave the signed-in Muse tab available, and run the bridge with:
+
+```sh
+MUSE_ACP_CDP_ENDPOINT=127.0.0.1:9333 muse-acp
+```
+
+The endpoint may also be written as `http://127.0.0.1:9333`. The bridge uses
+CDP only to create and drive its own tab; it does not terminate the existing
+browser when the ACP process exits. This is the supported visible-to-headless
+handoff when the authenticated profile belongs to another browser process.
+The bridge still verifies the live Muse composer before submitting a turn, so
+a reachable CDP endpoint alone is not treated as proof of authentication.
 
 ## How a turn flows
 
@@ -327,6 +357,7 @@ bridge depends on those strings.
 | `MUSE_ACP_CHROME` | Chromium binary path (default: `PATH` + well-known locations) |
 | `MUSE_ACP_HEADLESS` | `0`/`1` to force headed/headless (default: headed until a session is saved) |
 | `MUSE_ACP_LOG` | Log filter, e.g. `debug` (default `info`); logs go to stderr, never stdout |
+| `MUSE_ACP_CDP_ENDPOINT` | Attach to an operator-owned Chromium DevTools endpoint instead of launching a bridge-owned browser, e.g. `127.0.0.1:9333` |
 | `MUSE_ACP_SIDE_CHAT_MODE` | `auto` (default: side chat, fall back to fresh chat on a miss), `strict` (fail the turn on a miss), `off` (never select a side chat) |
 | `MUSE_ACP_SIDE_CHAT_MAP` | Comma-separated `channel=title` overrides, e.g. `MASKY-CMO=My CMO chat` (default titles are `<channel> (buzz)`, then `<channel>`) |
 | `MUSE_ACP_SIDE_CHAT_MAP_FILE` | JSON file for the persisted channel -> side-chat mapping (see channel discovery above); unset = in-memory only |

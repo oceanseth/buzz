@@ -22,6 +22,8 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     // invocations — not listed here.
     "buzz-dev-mcp",
     "buzz_dev_mcp",
+    "muse-acp",
+    "muse_acp",
 ];
 
 /// Script interpreters that may host managed agent wrappers (e.g. npm shims).
